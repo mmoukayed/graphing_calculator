@@ -23,4 +23,7 @@ struct Layout {
 };
 using Measure=std::function<int(const std::string&,int)>;
 Layout typeset(const std::string& source,const Measure& measure,int font=2);
+// Convert calculator syntax to a LaTeX math expression. Returns false for
+// incomplete or invalid source rather than silently encoding a partial formula.
+bool toLatex(const std::string& source,std::string& output);
 }

@@ -1,13 +1,20 @@
 #include "Hardware.h"
 #include "BoardConfig.h"
 #include <Wire.h>
+#include <qrcode.h>
 #include <algorithm>
+#include <array>
 
 namespace hardware {
 TFT_eSPI display;
 bool touchFound=false,keyboardFound=false;
 static uint8_t touchAddress=0x5D;
 static volatile int ballX=0,ballY=0;
+constexpr int QrMaxVersion=16,QrMaxSize=4*QrMaxVersion+17;
+static BatteryInfo battery;
+static std::array<uint8_t,QrMaxSize*QrMaxSize> qrModules{};
+static int qrDimension=0;
+static bool qrValid=false;
 static portMUX_TYPE ballMux=portMUX_INITIALIZER_UNLOCKED;
 static void IRAM_ATTR right() {portENTER_CRITICAL_ISR(&ballMux);++ballX;portEXIT_CRITICAL_ISR(&ballMux);}
 static void IRAM_ATTR left() {portENTER_CRITICAL_ISR(&ballMux);--ballX;portEXIT_CRITICAL_ISR(&ballMux);}
@@ -22,6 +29,28 @@ static bool readReg(uint16_t reg,uint8_t* data,size_t n) {
 static void acknowledge() {
     Wire.beginTransmission(touchAddress);Wire.write(0x81);Wire.write(0x4E);Wire.write(0);Wire.endTransmission();
 }
+static void captureQr(esp_qrcode_handle_t code){
+    int size=esp_qrcode_get_size(code);if(size<=0||size>QrMaxSize){qrValid=false;return;}
+    qrDimension=size;
+    for(int y=0;y<size;++y)for(int x=0;x<size;++x)qrModules[y*size+x]=esp_qrcode_get_module(code,x,y)?1:0;
+    qrValid=true;
+}
+void sampleBattery(){
+    uint32_t mv=0,raw=0;
+    for(int j=0;j<16;++j){mv+=analogReadMilliVolts(board::BatteryAdc);raw+=analogRead(board::BatteryAdc);delayMicroseconds(150);}
+    battery.adcMillivolts=mv/16;battery.millivolts=battery.adcMillivolts*2;battery.raw=raw/16;
+    // GPIO4 sees half of the single-cell Li-ion pack through a 1:1 divider.
+    battery.valid=battery.adcMillivolts>=130&&battery.adcMillivolts<=2300;
+}
+BatteryInfo batteryInfo(){return battery;}
+bool generateQr(const char* payload){
+    qrValid=false;qrDimension=0;if(!payload||!*payload)return false;
+    esp_qrcode_config_t config=ESP_QRCODE_CONFIG_DEFAULT();
+    config.display_func=captureQr;config.max_qrcode_version=QrMaxVersion;config.qrcode_ecc_level=ESP_QRCODE_ECC_LOW;
+    return esp_qrcode_generate(&config,payload)==ESP_OK&&qrValid;
+}
+int qrSize(){return qrValid?qrDimension:0;}
+bool qrModule(int x,int y){return qrValid&&x>=0&&y>=0&&x<qrDimension&&y<qrDimension&&qrModules[y*qrDimension+x]!=0;}
 void brightness(uint8_t level) {
     static uint8_t current=0;level=std::min(uint8_t(16),level);
     if(level==0){digitalWrite(board::Backlight,LOW);delay(3);current=0;return;}
@@ -32,6 +61,7 @@ void brightness(uint8_t level) {
 }
 void begin() {
     pinMode(board::Power,OUTPUT);digitalWrite(board::Power,HIGH);
+    pinMode(board::BatteryAdc,INPUT);analogReadResolution(12);analogSetPinAttenuation(board::BatteryAdc,ADC_11db);sampleBattery();
     for(int pin:{board::SdCs,board::RadioCs,12}){pinMode(pin,OUTPUT);digitalWrite(pin,HIGH);}
     pinMode(board::Backlight,OUTPUT);brightness(0);delay(500);
     Wire.begin(board::Sda,board::Scl);Wire.setClock(400000);Wire.setTimeOut(20);

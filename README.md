@@ -36,7 +36,7 @@ The application binary is `.pio/build/t-deck/firmware.bin`. Use PlatformIO Uploa
 | `$` | Main menu from any screen |
 | Tab, then Enter | Cycle through and activate the six soft keys |
 | Escape (USB serial input) | Back |
-| 1–9 in main menu | Open the corresponding app |
+| 1–9, 0 in main menu | Open the corresponding app; 0 opens CONVERT |
 | TRACE mode | Roll left/right to trace, up/down to change curve; click to return to pointer mode |
 
 Tap the input line or a form field to open the virtual keypad. It includes digits, operators, parentheses, fraction/power/root templates, `x`, `=`, `ans`, commas and semicolons. Its `<` and `>` keys move the insertion cursor. **OPTN** opens a paged scientific function catalog, including `pi` and factorial. Catalog insertion returns to the original input. **AC** clears only that input. Edits take effect immediately; DONE or the menu shortcut leaves the editor.
@@ -69,12 +69,26 @@ USB serial also accepts ASCII expressions and commands at 115200 baud. Use a sin
 | TABLE | Two function columns at a time; selectable functions, start, step, and paging |
 | EQUATION | Real/complex quadratic and cubic roots; simultaneous linear equations with up to six unknowns |
 | STATISTICS | Count, sum, sum of squares, mean, population/sample SD, min/max, median and quartiles; linear regression, r and r² |
-| MATRIX | Determinant, inverse, transpose, multiplication, addition; up to 6×6 square matrices |
+| MATRIX | Editable bracketed grids; determinant, inverse, transpose, multiplication, addition; 1–6 rows and columns |
 | BASE / FIN | Signed 64-bit base conversion (input bases 2–36; binary/octal/decimal/hex output); monthly loan payment, future/present value |
-| SETUP | Radians/degrees/gradians, 4–12 significant digits, 16 brightness levels, graph type, input detection status |
+| CONVERT | 23 unit families: length, area, volume, mass, temperature, speed, time, frequency, pressure, energy, power, force, angle, data size/rate, fuel economy, density, torque and electrical units |
+| QR LATEX | Scan a QR code to open the current RUN expression or equation rendered as LaTeX |
+| SETUP | Radians/degrees/gradians, 4–12 significant digits, 16 brightness levels, battery estimate, system information |
 | HELP | On-device controls, expression syntax, examples and limitations |
 
 Settings, graph definitions/enabled state/window, table setup, variables, X, and Ans are saved to ESP32 NVS after 1.5 seconds without edits. SETUP → SAVE saves immediately. History and temporary tool-form inputs are session-only. No SD card is required.
+
+### Unit conversion
+
+Open **CONVERT** from the main menu (keyboard shortcut **0**). Choose a category, enter a number or math expression, select the source and destination units, then press **EXE**. Tap **VALUE**, **FROM**, or **TO** or use the matching soft key; tap a unit to select it. **SWAP** reverses the selected units. The converter includes metric, US customary and Imperial units for everyday quantities, plus SI and common engineering units for frequency, pressure, energy, power, force, angle, digital storage/rates, density, torque, current, voltage, resistance, charge and capacitance. Temperature includes Celsius, Fahrenheit, Kelvin, Rankine and Reaumur. Fuel economy handles the reciprocal L/100 km scale alongside km/L and US/Imperial mpg; fuel economy inputs must be positive.
+
+Binary data units distinguish SI decimal prefixes (kB, MB, GB) from IEC binary prefixes (KiB, MiB, GiB). A conversion keeps full double-precision internally and displays the configured significant digits. A year uses 365.25 days; calories use the thermochemical calorie and BTU uses the IT definition.
+
+### Battery, system information, and QR equations
+
+The top bar samples the T-Deck's GPIO4 battery divider and shows a percentage when its voltage reading is in range. **SETUP** displays the pack voltage and estimate; **SYSTEM** shows the ADC reading, ESP32 model/revision, CPU, flash, PSRAM, free heap, SDK, and uptime. The T-Deck has no fuel gauge, so percentage is a rough single-cell Li-ion voltage estimate, not a measured state of charge. Its charging indicator is not connected to an ESP32 input, so software cannot report charging/full status. USB charging and load can shift the voltage estimate.
+
+In RUN-MAT, tap **QR** to display a QR for the current expression, or the latest calculation if the input is blank. Equation results also have a QR soft key. The QR opens the expression at [CodeCogs' LaTeX renderer](https://latex.codecogs.com/), so the phone needs internet to render it. The expression is part of the URL and is sent to the renderer when scanned/opened. This uses the T-Deck's built-in ESP32 QR encoder.
 
 ### Expressions
 
@@ -116,33 +130,44 @@ Tap/drag inside the plot to position the trace parameter. Trackball vertical mot
 
 Lists: `1,2,3,4,5`; individual entries may be expressions such as `sqrt(2)`. Up to 128 list values are accepted within the 384-character input limit. Quartiles use the median of each half, excluding the middle value for odd-sized lists; sample SD needs at least two values.
 
-Matrices: commas separate columns and semicolons separate rows. `1,2;3,4` is a 2×2 matrix. Matrix results wrap instead of discarding long rows. Singular/ill-conditioned inverses and invalid dimensions report errors.
+Matrices use a **row-and-column grid inside matrix brackets**, with no row separators to type. Choose an operation in MATRIX, then:
 
-Simultaneous equations use augmented rows. `2,1,5;1,-1,1` means `2x+y=5`, `x-y=1`. For n unknowns, supply n rows of n coefficients and a final right-hand side.
+- Use **R− / R+** and **C− / C+** to set 1–6 rows and columns. Addition/multiplication have separate **A / B** tabs and independent dimensions.
+- Tap a cell, or roll the trackball pointer onto it and click, to open its math editor. Cells accept expressions such as `1/2`, `sqrt(2)` and `max(1,3)`.
+- **PREV / NEXT** selects cells in row order. Typing directly in the grid replaces the selected cell; **EDIT** opens its existing expression for changes. **CLR** clears just that cell. **EXE** or Enter calculates.
+- Matrix results also use brackets and aligned cells. Tap a result cell or use PREV/NEXT to see its value at the configured precision below the grid. Long entries are abbreviated in small cells; open EDIT to view a complete input expression.
+
+BACK preserves your inputs. Resizing down and back up preserves hidden cells within the current form. Opening another operation starts with example matrices; matrix inputs are session-only and not saved across resets. Invalid entries identify the operand and cell; BACK focuses that cell. Singular/ill-conditioned inverses and invalid dimensions report errors.
+
+![Matrix grid editor](docs/previews/matrix.png) ![Matrix result](docs/previews/matrix-result.png)
+
+Simultaneous equations use an augmented grid, with coefficient columns labeled x1, x2, etc., and a separate **RHS** column. **N− / N+** sets 1–6 unknowns; the RHS stays in the final column when resizing. For example, rows containing 2, 1, 5 and 1, −1, 1 represent `2x+y=5` and `x-y=1`.
 
 Base conversion uses sign-magnitude text for negative values, not a fixed-width two's-complement representation. Finance assumes ordinary compounding and no fees/taxes. Loan rates are annual percentages with monthly payments; PV/FV rates are percentages per period.
 
 ## Validation and hardware notes
 
-The native tests run the math engine and the actual application screen/input handlers with a desktop framebuffer and mock device I/O. They use AddressSanitizer and UndefinedBehaviorSanitizer and emit PPM previews. The current suite passes 214 math checks plus 157 layout/application checks, including initial guesses, repeated roots, domain failures, residual checks, SHIFT/CALC flows, expression grouping, and formatted caret placement. Run on macOS/Linux with a C++17 compiler:
+The native tests run the math engine and the actual application screen/input handlers with a desktop framebuffer and mock device I/O. They use AddressSanitizer and UndefinedBehaviorSanitizer and emit PPM previews. The current suite passes 214 math checks plus 248 layout/application checks, including initial guesses, repeated roots, domain failures, residual checks, SHIFT/CALC flows, expression grouping, formatted caret placement, matrix resizing, touch/trackball cell editing, rectangular operations, and augmented systems. Run on macOS/Linux with a C++17 compiler:
 
 ```sh
 sh scripts/test.sh
 # Or: CXX=g++ sh scripts/test.sh
 ```
 
-The firmware has been compiled for ESP32-S3. It has **not been flashed or physically tested** in this workspace. Desktop input tests do not verify real I²C timing, display colors, touch alignment, or trackball polarity.
+The earlier firmware revision compiled for ESP32-S3. This revision's application and math-layout sources pass a host syntax check, but its full PlatformIO build has not been verified because the required Arduino-ESP32 framework version is unavailable in the local package cache. It has **not been flashed or physically tested** in this workspace. Desktop input tests do not verify real I²C timing, display colors, touch alignment, battery voltage calibration, or trackball polarity.
 
 After flashing:
 
-1. Check the display, keyboard and GT911 detection messages in the serial monitor or SETUP.
+1. Check the display, keyboard, GT911, battery estimate and system information in SETUP.
 2. Tap all four screen corners and several virtual keys. Coordinate swap/mirroring is in `include/BoardConfig.h`, based on LILYGO's example.
 3. Roll in all four directions and click/hold the trackball. The mapped pins are right=2, up=3, left=1, down=15, center=0.
 4. Enter `sin(30)` in DEG mode and check `0.5`; enter `sqrt(-1)` and check `1i`.
 5. Plot `x^2-2`, trace it, then use G-SLV root bounds `0,2`. Check approximately `1.414213562`.
 6. Save, reset, and confirm graph entries, angle mode and stored variables return.
+7. In MATRIX, choose Inverse, edit individual grid cells using touch and trackball, then EXE. The default matrix has inverse rows −2, 1 and 1.5, −0.5. Check R/C resizing and A/B selection in Multiply.
+8. Compare the battery voltage in SYSTEM with a multimeter, remembering that the percent is approximate. Scan a RUN QR with a phone and confirm the rendered LaTeX opens.
 
-GT911 uses the shared I²C bus on SDA18/SCL8. The driver probes 0x5D and 0x14, polls status, acknowledges reports, and processes press/release separately. Keyboard characters are polled from 0x55. Trackball edges use interrupts; center-click/hold is debounced. Peripheral power GPIO10 is enabled, and SD/LoRa chip selects are held inactive before display access. The display uses the T-Deck panel power/gamma configuration and a PSRAM-backed framebuffer. The backlight uses the board's 16-step pulse control rather than PWM.
+GT911 uses the shared I²C bus on SDA18/SCL8. The driver probes 0x5D and 0x14, polls status, acknowledges reports, and processes press/release separately. Keyboard characters are polled from 0x55. Trackball edges use interrupts; center-click/hold is debounced. Battery voltage uses the board's GPIO4 ADC divider. Peripheral power GPIO10 is enabled, and SD/LoRa chip selects are held inactive before display access. The display uses the T-Deck panel power/gamma configuration and a PSRAM-backed framebuffer. The backlight uses the board's 16-step pulse control rather than PWM.
 
 This target does not cover the e-paper T-Deck Pro or T-Deck Max.
 
@@ -152,7 +177,7 @@ This implements a substantial selection of CG50-style workflows, not full fx-CG5
 
 SHIFT CALC solves one real unknown X using bounded damped Newton steps and an automatic bracketing fallback. It can find some repeated roots but does not enumerate every root, guarantee the nearest root, or solve every discontinuous/ill-conditioned expression. Search is limited to X within ±10¹², 768 function evaluations, and a 1.5-second application deadline checked between evaluations. If it reports Cannot solve, change the initial guess or use the existing bracketed solver for a known interval. Plain `solve(expression,lower,upper)` remains the original bracketed function.
 
-Inputs are limited to 384 characters, 256 parser nodes and 32 levels of expression-tree depth. Expression evaluation has an operation budget (100,000 normally; 4,096 per graph/table sample). Graph rendering stops after 350 ms and labels an incomplete plot, keeping expensive expressions from blocking input indefinitely. Numerical derivatives and integrals are approximations. Root solving requires a sign-changing bracket and may miss repeated/tangent roots. Extrema assume a unimodal interval. Simpson integration checks successive refinements, but oscillatory/discontinuous functions can still fool numerical sampling. Graphs use finite sampling and midpoint discontinuity checks; small features or poles can be missed. Very ill-conditioned matrices or badly scaled polynomials can lose accuracy.
+Inputs (each individual cell for matrices) are limited to 384 characters, 256 parser nodes and 32 levels of expression-tree depth. Expression evaluation has an operation budget (100,000 normally; 4,096 per graph/table sample or matrix cell). Graph rendering stops after 350 ms and labels an incomplete plot, keeping expensive expressions from blocking input indefinitely. Numerical derivatives and integrals are approximations. Root solving requires a sign-changing bracket and may miss repeated/tangent roots. Extrema assume a unimodal interval. Simpson integration checks successive refinements, but oscillatory/discontinuous functions can still fool numerical sampling. Graphs use finite sampling and midpoint discontinuity checks; small features or poles can be missed. Very ill-conditioned matrices or badly scaled polynomials can lose accuracy.
 
 ## Sources and third-party code
 

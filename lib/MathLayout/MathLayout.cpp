@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <utility>
 
 namespace mathlayout {
 namespace {
@@ -93,6 +94,53 @@ public:
         return a;
     }
 };
+std::string latex(const Parser& parser,int index,bool& valid,int depth=0){
+    if(index<0||depth>32){valid=false;return {};}
+    const Node& n=parser.nodes[index];
+    auto child=[&](size_t j){return latex(parser,n.children[j],valid,depth+1);};
+    if(n.kind=='t'){
+        std::string lower=n.text;for(char& c:lower)c=std::tolower(static_cast<unsigned char>(c));
+        if(lower=="pi")return "\\pi";
+        if(lower=="ans")return "\\operatorname{Ans}";
+        size_t e=n.text.find_first_of("eE");
+        if(e!=std::string::npos&&e>0&&e+1<n.text.size()&&(std::isdigit(static_cast<unsigned char>(n.text[0]))||n.text[0]=='.'))
+            return n.text.substr(0,e)+"\\times 10^{"+n.text.substr(e+1)+"}";
+        return n.text;
+    }
+    if(n.kind=='h'){valid=false;return "\\square";}
+    if(n.kind=='r'){
+        std::string a=child(0),b=child(1);
+        if(n.text.empty())return a+" "+b;
+        if(n.text=="*")return a+" \\times "+b;
+        return a+n.text+b;
+    }
+    if(n.kind=='u')return n.text+child(0);
+    if(n.kind=='o')return child(0)+(n.text=="%"?"\\%":n.text);
+    if(n.kind=='g')return "\\left("+child(0)+"\\right)";
+    if(n.kind=='f')return "\\frac{"+child(0)+"}{"+child(1)+"}";
+    if(n.kind=='p')return "{"+child(0)+"}^{"+child(1)+"}";
+    if(n.kind=='s')return std::tolower(static_cast<unsigned char>(n.text[0]))=='c'?"\\sqrt[3]{"+child(0)+"}":"\\sqrt{"+child(0)+"}";
+    std::string name=n.text;for(char& c:name)c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    std::vector<std::string> args;for(size_t j=0;j<n.children.size();++j)args.push_back(child(j));
+    if(name=="abs"&&args.size()==1)return "\\left|"+args[0]+"\\right|";
+    if(name=="conj"&&args.size()==1)return "\\overline{"+args[0]+"}";
+    if(name=="re"&&args.size()==1)return "\\Re\\left("+args[0]+"\\right)";
+    if(name=="im"&&args.size()==1)return "\\Im\\left("+args[0]+"\\right)";
+    if(name=="sqrt"&&args.size()==1)return "\\sqrt{"+args[0]+"}";
+    if(name=="cbrt"&&args.size()==1)return "\\sqrt[3]{"+args[0]+"}";
+    if(name=="ncr"&&args.size()==2)return "\\binom{"+args[0]+"}{"+args[1]+"}";
+    static const std::pair<const char*,const char*> names[]={
+        {"sin","\\sin"},{"cos","\\cos"},{"tan","\\tan"},{"asin","\\arcsin"},{"acos","\\arccos"},{"atan","\\arctan"},
+        {"sinh","\\sinh"},{"cosh","\\cosh"},{"tanh","\\tanh"},{"asinh","\\operatorname{asinh}"},{"acosh","\\operatorname{acosh}"},{"atanh","\\operatorname{atanh}"},
+        {"ln","\\ln"},{"log","\\log_{10}"},{"log2","\\log_{2}"},{"exp","\\exp"},{"min","\\min"},{"max","\\max"}
+    };
+    std::string op;
+    for(auto& entry:names)if(name==entry.first){op=entry.second;break;}
+    if(op.empty())op="\\operatorname{"+name+"}";
+    std::string joined;
+    for(size_t j=0;j<args.size();++j){if(j)joined+=", ";joined+=args[j];}
+    return op+"\\left("+joined+"\\right)";
+}
 struct Mark {size_t index;Caret caret;};
 struct Box {
     int width=0,above=0,below=0;
@@ -219,6 +267,12 @@ Layout typeset(const std::string& source,const Measure& measure,int font){
     Caret previous{0,0,font==1?8:16};
     for(size_t j=0;j<out.carets.size();++j){if(mapped[j])previous=out.carets[j];else out.carets[j]=previous;}
     return out;
+}
+bool toLatex(const std::string& source,std::string& output){
+    Parser parser(source);int root=parser.parse();if(!parser.ok||root<0){output.clear();return false;}
+    bool valid=true;std::string expression=latex(parser,root,valid);
+    if(!valid){output.clear();return false;}
+    output="\\displaystyle "+expression;return true;
 }
 size_t Layout::hitTest(int x,int y) const {
     size_t best=0;long long distance=std::numeric_limits<long long>::max();

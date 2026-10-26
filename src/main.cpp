@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cctype>
+#include <utility>
 
 using std::string;
 using std::vector;
@@ -19,11 +20,18 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 namespace {
 constexpr uint16_t Bg=0xEF5D,Ink=0x1928,Muted=0x6B70,Blue=0x2256,Teal=0x0493,White=0xFFFF,Red=0xD986,Line=0xCE79;
 constexpr uint16_t Colors[]={0x21DB,0xE1CA,0x058D,0xA9DB,0xEBC0,0x059C};
-enum class Screen {Menu,Run,Functions,Graph,Table,Tools,Form,Results,Settings,Help,Editor,Catalog};
+enum class Screen {Menu,Run,Functions,Graph,Table,Tools,Form,Results,Settings,Help,Editor,Catalog,UnitCategories,UnitConvert,UnitSelect,SystemInfo,QRCode};
 enum class Tool {Root,Minimum,Maximum,Intersection,Derivative,Integral,Quadratic,Cubic,Linear,Stats,Regression,Det,Inverse,Transpose,Multiply,Add,Base,Payment,Future,Present,TableSetup,Window,Substitute,ShiftSolve};
 struct Button {int x,y,w,h;string label;std::function<void()> action;};
 struct Field {string label,value;};
 struct History {string input,output;bool error;Value value;};
+struct MatrixInput {
+    int rows=2,cols=2;
+    std::array<std::array<string,7>,6> cells;
+    MatrixInput(){for(auto& row:cells)row.fill("0");}
+};
+struct UnitDef {string name,symbol;double scale,offset=0,reciprocal=0;};
+struct UnitCategory {string name;vector<UnitDef> units;};
 Screen screen=Screen::Menu,editorReturn=Screen::Run,catalogReturn=Screen::Run,resultReturn=Screen::Form;
 Screen formReturn=Screen::Tools;
 Tool activeTool=Tool::Root;
@@ -34,6 +42,16 @@ vector<Button> buttons;
 vector<Field> fields;
 vector<History> history;
 vector<string> resultLines;
+std::array<MatrixInput,2> matrixInputs;
+calc::Matrix resultMatrix;
+int matrixOperand=0,matrixRow=0,matrixCol=0,resultMatrixCell=0;
+bool matrixReplace=true;
+string unitValue="1";
+int unitCategory=0,unitFrom=0,unitTo=1,unitCategoryPage=0,unitListPage=0;
+bool selectingSource=true;
+string qrEquation="";
+Screen qrReturn=Screen::Run;
+bool qrReady=false;
 string title="",runEntry="",notice="",resultTitle="";
 string resultEquation="";
 string* editTarget=nullptr;
@@ -57,6 +75,122 @@ constexpr int GX=24,GY=42,GW=284,GH=135;
 void render();void open(Screen s);void execute();void soft(int n);void showTools(int group);
 void showForm(Tool tool);void showEditor(string& target,Screen back);void compileGraphs();
 void launchCalc(bool solve);
+void showQr(const string& source);
+string fmt(Value v);
+void message(const string& s);
+void showResults(const string& heading,const vector<string>& lines,Screen back);
+const vector<UnitCategory>& unitCategories(){
+    static const vector<UnitCategory> categories={
+        {"Length",{{"meter","m",1},{"kilometer","km",1000},{"centimeter","cm",.01},{"millimeter","mm",.001},{"micrometer","um",1e-6},{"nanometer","nm",1e-9},{"inch","in",.0254},{"foot","ft",.3048},{"yard","yd",.9144},{"mile","mi",1609.344},{"nautical mile","nmi",1852},{"fathom","fathom",1.8288},{"astronomical unit","AU",149597870700.0},{"light-year","ly",9.4607304725808e15},{"parsec","pc",3.085677581491367e16}}},
+        {"Area",{{"square meter","m2",1},{"square kilometer","km2",1e6},{"square centimeter","cm2",1e-4},{"square foot","ft2",.09290304},{"square inch","in2",.00064516},{"square yard","yd2",.83612736},{"hectare","ha",10000},{"acre","ac",4046.8564224},{"square mile","mi2",2589988.110336}}},
+        {"Volume",{{"cubic meter","m3",1},{"liter","L",.001},{"milliliter","mL",1e-6},{"cubic centimeter","cm3",1e-6},{"US gallon","US gal",.003785411784},{"US quart","US qt",.000946352946},{"US pint","US pt",.000473176473},{"US cup","US cup",.0002365882365},{"US fluid ounce","US fl oz",2.95735295625e-5},{"US tablespoon","US tbsp",1.478676478125e-5},{"US teaspoon","US tsp",4.92892159375e-6},{"Imperial gallon","Imp gal",.00454609},{"Imperial quart","Imp qt",.0011365225},{"Imperial pint","Imp pt",.00056826125},{"Imperial fluid ounce","Imp fl oz",2.84130625e-5},{"cubic foot","ft3",.028316846592},{"cubic inch","in3",1.6387064e-5}}},
+        {"Mass",{{"kilogram","kg",1},{"gram","g",.001},{"milligram","mg",1e-6},{"microgram","ug",1e-9},{"metric tonne","t",1000},{"ounce","oz",.028349523125},{"pound","lb",.45359237},{"stone","st",6.35029318},{"US short ton","short ton",907.18474},{"UK long ton","long ton",1016.0469088}}},
+        {"Temperature",{{"Celsius","deg C",1,273.15},{"Fahrenheit","deg F",5.0/9.0,255.3722222222222},{"Kelvin","K",1},{"Rankine","deg R",5.0/9.0},{"Reaumur","deg Re",1.25,273.15}}},
+        {"Speed",{{"meter per second","m/s",1},{"kilometer per hour","km/h",1.0/3.6},{"mile per hour","mph",.44704},{"foot per second","ft/s",.3048},{"knot","kn",.5144444444444445},{"centimeter per second","cm/s",.01}}},
+        {"Time",{{"second","s",1},{"millisecond","ms",.001},{"microsecond","us",1e-6},{"minute","min",60},{"hour","h",3600},{"day","d",86400},{"week","wk",604800},{"year (365.25 d)","yr",31557600}}},
+        {"Frequency",{{"hertz","Hz",1},{"kilohertz","kHz",1e3},{"megahertz","MHz",1e6},{"gigahertz","GHz",1e9},{"revolution/minute","rpm",1.0/60}}},
+        {"Pressure",{{"pascal","Pa",1},{"kilopascal","kPa",1e3},{"megapascal","MPa",1e6},{"bar","bar",1e5},{"millibar","mbar",100},{"standard atmosphere","atm",101325},{"torr","Torr",101325.0/760.0},{"millimeter mercury","mmHg",133.322387415},{"pound/in2","psi",6894.757293168}}},
+        {"Energy",{{"joule","J",1},{"kilojoule","kJ",1e3},{"calorie (th)","cal",4.184},{"kilocalorie","kcal",4184},{"watt-hour","Wh",3600},{"kilowatt-hour","kWh",3.6e6},{"electronvolt","eV",1.602176634e-19},{"BTU (IT)","BTU",1055.05585262},{"foot-pound force","ft lbf",1.3558179483314}}},
+        {"Power",{{"watt","W",1},{"kilowatt","kW",1e3},{"megawatt","MW",1e6},{"milliwatt","mW",.001},{"mechanical horsepower","hp",745.699871582},{"metric horsepower","PS",735.49875},{"BTU/hour","BTU/h",.293071070172}}},
+        {"Force",{{"newton","N",1},{"kilonewton","kN",1e3},{"dyne","dyn",1e-5},{"kilogram-force","kgf",9.80665},{"pound-force","lbf",4.4482216152605}}},
+        {"Angle",{{"radian","rad",1},{"degree","deg",calc::Pi/180},{"gradian","grad",calc::Pi/200},{"arcminute","arcmin",calc::Pi/10800},{"arcsecond","arcsec",calc::Pi/648000},{"turn","turn",2*calc::Pi}}},
+        {"Data size",{{"bit","bit",1},{"byte","B",8},{"kilobit (SI)","kbit",1e3},{"kilobyte (SI)","kB",8e3},{"megabyte (SI)","MB",8e6},{"gigabyte (SI)","GB",8e9},{"kibibyte","KiB",8192},{"mebibyte","MiB",8388608},{"gibibyte","GiB",8589934592.0}}},
+        {"Data rate",{{"bit/second","bit/s",1},{"kilobit/second","kbit/s",1e3},{"megabit/second","Mbit/s",1e6},{"gigabit/second","Gbit/s",1e9},{"byte/second","B/s",8},{"kilobyte/second","kB/s",8e3},{"megabyte/second","MB/s",8e6},{"kibibyte/second","KiB/s",8192},{"mebibyte/second","MiB/s",8388608}}},
+        {"Fuel economy",{{"kilometer/liter","km/L",1},{"mile/US gallon","mpg US",.425143707430272},{"mile/Imperial gallon","mpg Imp",.3540061899346476},{"liter/100 kilometer","L/100km",1,0,100}}},
+        {"Density",{{"kilogram/m3","kg/m3",1},{"gram/cm3","g/cm3",1000},{"gram/liter","g/L",1},{"kilogram/liter","kg/L",1000},{"pound/ft3","lb/ft3",16.01846337396},{"pound/US gallon","lb/US gal",119.826427316}}},
+        {"Torque",{{"newton meter","N m",1},{"newton centimeter","N cm",.01},{"kilonewton meter","kN m",1e3},{"pound-force foot","lbf ft",1.3558179483314},{"pound-force inch","lbf in",.1129848290276},{"kilogram-force meter","kgf m",9.80665}}},
+        {"Current",{{"ampere","A",1},{"milliampere","mA",.001},{"microampere","uA",1e-6},{"kiloampere","kA",1000}}},
+        {"Voltage",{{"volt","V",1},{"millivolt","mV",.001},{"microvolt","uV",1e-6},{"kilovolt","kV",1000},{"megavolt","MV",1e6}}},
+        {"Resistance",{{"ohm","ohm",1},{"milliohm","mohm",.001},{"kiloohm","kohm",1e3},{"megaohm","Mohm",1e6},{"gigaohm","Gohm",1e9}}},
+        {"Electric charge",{{"coulomb","C",1},{"ampere-hour","Ah",3600},{"milliampere-hour","mAh",3.6},{"millicoulomb","mC",.001},{"microcoulomb","uC",1e-6},{"elementary charge","e",1.602176634e-19}}},
+        {"Capacitance",{{"farad","F",1},{"millifarad","mF",.001},{"microfarad","uF",1e-6},{"nanofarad","nF",1e-9},{"picofarad","pF",1e-12},{"kilofarad","kF",1000}}}
+    };
+    return categories;
+}
+const UnitCategory& currentUnitCategory(){return unitCategories()[unitCategory];}
+void openUnitPicker(bool source){selectingSource=source;unitListPage=0;open(Screen::UnitSelect);}
+void convertUnits(){
+    const auto& category=currentUnitCategory();const auto& from=category.units[unitFrom];const auto& to=category.units[unitTo];
+    calc::Expression expression;calc::Result parsed;
+    if(!expression.compile(unitValue))parsed.error=expression.error();else parsed=expression.evaluate(context,4096);
+    if(!parsed||!calc::real(parsed.value)||!calc::finite(parsed.value)){
+        string error=!parsed?parsed.error:"Enter a finite real value";
+        showResults("Conversion error",{error,"Check the value and try again."},Screen::UnitConvert);return;
+    }
+    double input=parsed.value.real(),base=from.reciprocal!=0?from.reciprocal/input:input*from.scale+from.offset;
+    if(category.name=="Fuel economy"&&input<=0){
+        showResults("Conversion error",{"Fuel economy must be above zero.","Check the value and try again."},Screen::UnitConvert);return;
+    }
+    double output=to.reciprocal!=0?to.reciprocal/base:(base-to.offset)/to.scale;
+    if(!std::isfinite(base)||!std::isfinite(output)){
+        showResults("Conversion error",{"Result is undefined or out of range.","Check the value and selected units."},Screen::UnitConvert);return;
+    }
+    showResults(category.name,{fmt(Value(input))+" "+from.symbol,"=",fmt(Value(output))+" "+to.symbol},Screen::UnitConvert);
+}
+int estimatedBatteryPercent(const hardware::BatteryInfo& info){
+    if(!info.valid)return -1;
+    static const std::pair<int,int> curve[]={{3300,0},{3500,4},{3600,10},{3700,20},{3750,30},{3800,42},{3850,55},{3900,68},{3950,80},{4000,90},{4100,97},{4200,100}};
+    int mv=info.millivolts;
+    if(mv<=curve[0].first)return 0;
+    for(size_t j=1;j<sizeof(curve)/sizeof(curve[0]);++j)if(mv<=curve[j].first){
+        int dv=curve[j].first-curve[j-1].first,dp=curve[j].second-curve[j-1].second;
+        return curve[j-1].second+(mv-curve[j-1].first)*dp/dv;
+    }
+    return 100;
+}
+string percentEncode(const string& source){
+    static const char hex[]="0123456789ABCDEF";string output;output.reserve(source.size()*3);
+    for(unsigned char c:source){
+        if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='-'||c=='_'||c=='.'||c=='~')output.push_back(char(c));
+        else{output.push_back('%');output.push_back(hex[c>>4]);output.push_back(hex[c&15]);}
+    }
+    return output;
+}
+void showQr(const string& source){
+    string latex;
+    if(!mathlayout::toLatex(source,latex)){message("Complete a valid expression before QR");return;}
+    qrEquation=source;qrReturn=screen;
+    string url="https://latex.codecogs.com/svg.image?"+percentEncode(latex);
+    qrReady=hardware::generateQr(url.c_str());open(Screen::QRCode);
+}
+bool matrixTool(){return activeTool==Tool::Linear||activeTool==Tool::Det||activeTool==Tool::Inverse||activeTool==Tool::Transpose||activeTool==Tool::Multiply||activeTool==Tool::Add;}
+bool twoMatrices(){return activeTool==Tool::Multiply||activeTool==Tool::Add;}
+string& matrixCell(int operand,int row,int col){
+    // Keep an augmented system's RHS separate when its dimensions change.
+    return matrixInputs[operand].cells[row][activeTool==Tool::Linear&&col==matrixInputs[operand].cols-1?6:col];
+}
+void selectMatrixCell(int row,int col){
+    matrixRow=row;matrixCol=col;cursor=matrixCell(matrixOperand,row,col).size();matrixReplace=true;dirty=true;
+}
+void stepMatrixCell(int direction){
+    auto& m=matrixInputs[matrixOperand];int count=m.rows*m.cols;
+    int selected=(matrixRow*m.cols+matrixCol+direction+count)%count;
+    selectMatrixCell(selected/m.cols,selected%m.cols);
+}
+void resizeMatrix(int dr,int dc){
+    auto& m=matrixInputs[matrixOperand];
+    m.rows=std::max(1,std::min(6,m.rows+dr));
+    m.cols=activeTool==Tool::Linear?m.rows+1:std::max(1,std::min(6,m.cols+dc));
+    selectMatrixCell(std::min(matrixRow,m.rows-1),std::min(matrixCol,m.cols-1));
+}
+bool evaluateMatrix(int operand,calc::Matrix& out,string& error){
+    auto& m=matrixInputs[operand];out.assign(m.rows,vector<double>(m.cols));
+    for(int r=0;r<m.rows;++r)for(int c=0;c<m.cols;++c){
+        calc::Expression expression;const string& source=matrixCell(operand,r,c);
+        string problem;
+        if(!expression.compile(source))problem=expression.error();
+        else {auto value=expression.evaluate(context,4096);
+            if(!value)problem=value.error;
+            else if(!calc::real(value.value)||!calc::finite(value.value))problem="A finite real number is required";
+            else out[r][c]=value.value.real();
+        }
+        if(!problem.empty()){
+            matrixOperand=operand;selectMatrixCell(r,c);
+            error=string(operand?"B":"A")+"["+std::to_string(r+1)+","+std::to_string(c+1)+"]: "+problem;return false;
+        }
+    }
+    return true;
+}
 void markSave(){savePending=true;lastChange=millis();}
 string fmt(Value v){return calc::format(v,digits);}
 void message(const string& s){notice=s;noticeUntil=millis()+3500;dirty=true;}
@@ -101,7 +235,12 @@ void bar(const std::array<string,6>& labels){
 }
 void header(const string& name){
     canvas.fillRect(0,0,320,24,Ink);button(2,1,44,21,"MENU",[]{open(Screen::Menu);},Ink,White);
-    text(name,52,4,White,2);string angle=context.angle==calc::Angle::Radians?"RAD":context.angle==calc::Angle::Degrees?"DEG":"GRA";
+    text(clipped(name,20),52,4,White,2);
+    auto battery=hardware::batteryInfo();int charge=estimatedBatteryPercent(battery);
+    canvas.drawRect(232,6,17,12,White);canvas.fillRect(249,9,2,6,White);
+    if(charge>=0)canvas.fillRect(234,8,std::max(1,13*charge/100),8,charge<=15?Red:Teal);
+    text(charge<0?"--%":std::to_string(charge)+"%",253,8,charge>=0&&charge<=15?Red:White,1);
+    string angle=context.angle==calc::Angle::Radians?"RAD":context.angle==calc::Angle::Degrees?"DEG":"GRA";
     button(277,1,41,21,angle,[]{context.angle=calc::Angle((int(context.angle)+1)%3);compileGraphs();markSave();dirty=true;},Ink,White);
 }
 void calcKeys(){
@@ -110,7 +249,7 @@ void calcKeys(){
 }
 void open(Screen s){if(screen==Screen::Editor&&editorReturn==Screen::Functions)compileGraphs();screen=s;dirty=true;pointerVisible=false;shifted=false;notice.clear();}
 void showEditor(string& target,Screen back){editTarget=&target;editorReturn=back;cursor=target.size();open(Screen::Editor);}
-string* currentInput(){if(screen==Screen::Run)return &runEntry;if(screen==Screen::Editor)return editTarget;if(screen==Screen::Form&&!fields.empty())return &fields[fieldIndex].value;return nullptr;}
+string* currentInput(){if(screen==Screen::Run)return &runEntry;if(screen==Screen::Editor)return editTarget;if(screen==Screen::Form){if(matrixTool())return &matrixCell(matrixOperand,matrixRow,matrixCol);if(!fields.empty())return &fields[fieldIndex].value;}return nullptr;}
 void insert(const string& s){auto target=currentInput();if(!target)return;if(target->size()+s.size()>384){message("Maximum 384 characters");return;}cursor=std::min(cursor,target->size());target->insert(cursor,s);cursor+=s.size();dirty=true;markSave();}
 void erase(){auto target=currentInput();if(target&&cursor){cursor=std::min(cursor,target->size());target->erase(cursor-1,1);--cursor;dirty=true;markSave();}}
 void clearInput(){auto target=currentInput();if(target){target->clear();cursor=0;dirty=true;markSave();}}
@@ -122,7 +261,7 @@ void insertTemplate(const string& source,size_t caretOffset){
 void closeEditor(){if(editorReturn==Screen::Functions){compileGraphs();markSave();}open(editorReturn);}
 void catalog(){catalogReturn=screen;catalogPage=0;open(Screen::Catalog);}
 void showResults(const string& heading,const vector<string>& lines,Screen back=Screen::Form){
-    resultTitle=heading;resultLines.clear();resultEquation.clear();
+    resultTitle=heading;resultLines.clear();resultEquation.clear();resultMatrix.clear();resultMatrixCell=0;
     for(const auto& line:lines){if(line.empty())resultLines.push_back("");else for(size_t j=0;j<line.size();j+=49)resultLines.push_back(line.substr(j,49));}
     resultOffset=0;resultReturn=back;open(Screen::Results);
 }
@@ -193,12 +332,12 @@ void showForm(Tool tool){
         case Tool::Derivative:title="DERIVATIVE";field("f(x)",f);field("At x",fmt(traceX));break;
         case Tool::Quadratic:title="ax^2 + bx + c = 0";field("a","1");field("b","-3");field("c","2");break;
         case Tool::Cubic:title="CUBIC EQUATION";field("a (x^3)","1");field("b (x^2)","-6");field("c (x)","11");field("d","-6");break;
-        case Tool::Linear:title="SIMULTANEOUS";field("Augmented rows: a,b,RHS;...","2,1,5;1,-1,1");break;
+        case Tool::Linear:title="SIMULTANEOUS";break;
         case Tool::Stats:title="1-VARIABLE STATS";field("List (comma separated)","1,2,3,4,5");break;
         case Tool::Regression:title="LINEAR REGRESSION";field("X list","1,2,3,4,5");field("Y list","2,4,5,4,5");break;
         case Tool::Det:case Tool::Inverse:case Tool::Transpose:case Tool::Multiply:case Tool::Add:
             title=tool==Tool::Det?"DETERMINANT":tool==Tool::Inverse?"MATRIX INVERSE":tool==Tool::Transpose?"TRANSPOSE":tool==Tool::Multiply?"MATRIX A x B":"MATRIX A + B";
-            field("A: commas=columns ;=rows","1,2;3,4");if(tool==Tool::Multiply||tool==Tool::Add)field("B","1,0;0,1");break;
+            break;
         case Tool::Base:title="BASE CONVERSION";field("Integer digits","FF");field("Source base (2..36)","16");break;
         case Tool::Payment:title="LOAN PAYMENT";field("Principal","10000");field("Annual rate (%)","5");field("Number of months","36");break;
         case Tool::Future:case Tool::Present:title=tool==Tool::Future?"FUTURE VALUE":"PRESENT VALUE";field(tool==Tool::Future?"Present amount":"Future amount","1000");field("Rate per period (%)","5");field("Periods","10");break;
@@ -207,7 +346,19 @@ void showForm(Tool tool){
         case Tool::ShiftSolve:title="SHIFT CALC / SOLVE";field("Equation in X (or expression = 0)","x^2=2");field("Initial X",calc::format(context.x,12));break;
         case Tool::Substitute:title="CALC / SUBSTITUTE";field("Expression (stored variables used)","x^2");field("X value",calc::format(context.x,12));break;
     }
-    cursor=fields[0].value.size();open(Screen::Form);
+    if(matrixTool()){
+        matrixInputs={MatrixInput{},MatrixInput{}};matrixOperand=0;
+        if(tool==Tool::Linear){matrixInputs[0].cols=3;
+            matrixInputs[0].cells[0][0]="2";matrixInputs[0].cells[0][1]="1";matrixInputs[0].cells[0][6]="5";
+            matrixInputs[0].cells[1][0]="1";matrixInputs[0].cells[1][1]="-1";matrixInputs[0].cells[1][6]="1";
+        }else{
+            matrixInputs[0].cells[0][0]="1";matrixInputs[0].cells[0][1]="2";
+            matrixInputs[0].cells[1][0]="3";matrixInputs[0].cells[1][1]="4";
+            matrixInputs[1].cells[0][0]="1";matrixInputs[1].cells[1][1]="1";
+        }
+        selectMatrixCell(0,0);
+    }else cursor=fields[0].value.size();
+    open(Screen::Form);
 }
 void launchCalc(bool solve){
     string source=runEntry;
@@ -220,7 +371,6 @@ bool scalar(int index,double& value){calc::Expression e;e.compile(fields[index].
 void execute(){
     vector<string> lines;double a=0,b=0,c=0,d=0;string err;
     auto line=[&](const string& name,Value v){lines.push_back(name+" = "+fmt(v));};
-    auto matrixLines=[&](const calc::Matrix& m){for(auto& row:m){string s="[ ";for(double v:row)s+=calc::format(v,6)+"  ";lines.push_back(s+"]");}};
     if(activeTool==Tool::ShiftSolve||activeTool==Tool::Substitute){
         calc::Equation equation;
         if(!equation.compile(fields[0].value)){fail(equation.error());return;}
@@ -273,15 +423,19 @@ void execute(){
         if(activeTool==Tool::Stats){auto s=calc::statistics(x);line("n",double(s.n));line("Mean",s.mean);line("Sum",s.sum);line("Sum x^2",s.sumSq);line("Population SD",s.populationSD);line("Sample SD",s.sampleSD);line("Min",s.minimum);line("Q1",s.q1);line("Median",s.median);line("Q3",s.q3);line("Max",s.maximum);}
         else{if(!calc::parseList(fields[1].value,context,y,err)){fail(err);return;}auto r=calc::regression(x,y);if(!r.error.empty()){fail(r.error);return;}lines.push_back("Model: y = a + b*x");line("a",r.intercept);line("b",r.slope);line("r",r.r);line("r^2",r.r*r.r);}
     }else if(activeTool==Tool::Linear||activeTool==Tool::Det||activeTool==Tool::Inverse||activeTool==Tool::Transpose||activeTool==Tool::Multiply||activeTool==Tool::Add){
-        calc::Matrix m,n,out;if(!calc::parseMatrix(fields[0].value,context,m,err)){fail(err);return;}
+        calc::Matrix m,n,out;if(!evaluateMatrix(0,m,err)){fail(err);return;}
         if(activeTool==Tool::Linear){vector<double> values;if(!calc::linearSolve(m,values,err)){fail(err);return;}for(size_t j=0;j<values.size();++j)line("x"+std::to_string(j+1),values[j]);}
-        if(activeTool==Tool::Det){if(m.size()!=m[0].size()){fail("Square matrix required");return;}line("det(A)",calc::determinant(m));}
-        if(activeTool==Tool::Inverse){if(!calc::inverse(m,out,err)){fail(err);return;}matrixLines(out);}
-        if(activeTool==Tool::Transpose)matrixLines(calc::transpose(m));
-        if(activeTool==Tool::Multiply||activeTool==Tool::Add){if(!calc::parseMatrix(fields[1].value,context,n,err)){fail(err);return;}
+        if(activeTool==Tool::Det){if(m.size()!=m[0].size()){fail("Square matrix required");return;}double value=calc::determinant(m);if(!std::isfinite(value)){fail("Matrix result overflow");return;}line("det(A)",value);}
+        if(activeTool==Tool::Inverse){if(!calc::inverse(m,out,err)){fail(err);return;}}
+        if(activeTool==Tool::Transpose)out=calc::transpose(m);
+        if(activeTool==Tool::Multiply||activeTool==Tool::Add){if(!evaluateMatrix(1,n,err)){fail(err);return;}
             if(activeTool==Tool::Multiply){if(!calc::multiply(m,n,out)){fail("A columns must equal B rows");return;}}
             else{if(m.size()!=n.size()||m[0].size()!=n[0].size()){fail("Matrix sizes must match");return;}out=m;for(size_t j=0;j<m.size();++j)for(size_t k=0;k<m[0].size();++k)out[j][k]+=n[j][k];}
-            matrixLines(out);}
+        }
+        if(!out.empty()){
+            for(const auto& row:out)for(double value:row)if(!std::isfinite(value)){fail("Matrix result overflow");return;}
+            showResults(title,{});resultMatrix=std::move(out);return;
+        }
     }else if(activeTool==Tool::Base){
         if(!scalar(1,a))return;if(a<2||a>36||std::floor(a)!=a){fail("Source base must be 2..36");return;}
         errno=0;char* end=nullptr;const char* start=fields[0].value.c_str();long long value=std::strtoll(start,&end,int(a));
@@ -300,13 +454,13 @@ void execute(){
 
 void drawMenu(){
     header("DECK / CALC");
-    const char* names[]={"RUN-MAT","GRAPH","TABLE","EQUATION","STATISTICS","MATRIX","BASE / FIN","SETUP","HELP"};
-    const char* subtitles[]={"Scientific & complex","Plot / trace / solve","Function values","Roots & systems","Lists & regression","Up to 6 x 6","Integer & TVM","Angle / display","Keys & syntax"};
-    for(int j=0;j<9;++j){int x=5+(j%3)*105,y=31+(j/3)*57;
-        button(x,y,100,51,"",[j]{switch(j){case 0:open(Screen::Run);cursor=runEntry.size();break;case 1:open(Screen::Functions);break;case 2:open(Screen::Table);break;case 3:showTools(0);break;case 4:showTools(1);break;case 5:showTools(2);break;case 6:showTools(3);break;case 7:open(Screen::Settings);break;case 8:resultOffset=0;open(Screen::Help);break;}});
-        text(std::to_string(j+1),x+6,y+3,Colors[j%6],1);text(names[j],x+5,y+15,Ink,2);text(clipped(subtitles[j],15),x+5,y+37,Muted,1);
+    const char* names[]={"RUN-MAT","GRAPH","TABLE","EQUATION","STATISTICS","MATRIX","BASE / FIN","SETUP","HELP","CONVERT"};
+    const char* subtitles[]={"Scientific & complex","Plot / trace / solve","Function values","Roots & systems","Lists & regression","Up to 6 x 6","Integer & TVM","Angle / display","Keys & syntax","Length, temp + more"};
+    for(int j=0;j<10;++j){int x=5+(j%3)*105,y=29+(j/3)*42;
+        button(x,y,100,37,"",[j]{switch(j){case 0:open(Screen::Run);cursor=runEntry.size();break;case 1:open(Screen::Functions);break;case 2:open(Screen::Table);break;case 3:showTools(0);break;case 4:showTools(1);break;case 5:showTools(2);break;case 6:showTools(3);break;case 7:open(Screen::Settings);break;case 8:resultOffset=0;open(Screen::Help);break;case 9:unitCategoryPage=0;open(Screen::UnitCategories);break;}});
+        text(names[j],x+5,y+3,Ink,2);text(std::to_string(j==9?0:j+1),x+87,y+4,Colors[j%6],1);text(clipped(subtitles[j],16),x+5,y+23,Muted,1);
     }
-    text("Touch a tile  /  roll & click  /  1-9",14,204,Muted,1);
+    text("Touch / trackball  /  keys 1-9, 0",14,204,Muted,1);
     text("Hold trackball or press $ for MENU",14,221,Muted,1);
 }
 void drawRun(){
@@ -320,6 +474,7 @@ void drawRun(){
         buttons.push_back({0,y,320,58,"history",[j]{runEntry=history[j].input;cursor=runEntry.size();dirty=true;}});y+=60;
     }
     if(history.size()>2){button(248,149,32,18,"UP",[]{historyOffset=std::min(int(history.size())-2,historyOffset+2);dirty=true;});button(282,149,35,18,"DN",[]{historyOffset=std::max(0,historyOffset-2);dirty=true;});}
+    button(212,149,33,18,"QR",[]{if(!runEntry.empty())showQr(runEntry);else if(!history.empty())showQr(history.back().input);else message("Enter an expression first");});
     canvas.fillRect(3,168,314,40,White);canvas.drawRect(3,168,314,40,Line);
     if(runEntry.empty())text("Type here...",8,180,Muted,1);
     else mathText(runEntry,6,170,308,36,Ink,true);
@@ -393,7 +548,105 @@ void drawTools(){
     if(toolGroup==1){text("Distributions are in RUN > OPTN.",8,150,Muted,1);text("Normal, binomial and Poisson PDF/CDF",8,169,Muted,1);}
     bar({"","","","","",toolGroup==4?"GRAPH":"MENU"});
 }
+// Values stay in aligned cells inside one pair of brackets. Long expressions
+// are abbreviated here; EDIT opens their full, scrollable math layout.
+void matrixValue(const string& value,int x,int y,int w,int h,uint16_t color){
+    auto measure=[](const string& s,int f){return canvas.textWidth(s.c_str(),f);};
+    auto layout=mathlayout::typeset(value,measure,2);int font=2;
+    if(layout.width>w-4||layout.height>h){font=1;layout=mathlayout::typeset(value,measure,1);}
+    if(layout.width<=w-4&&layout.height<=h){
+        int width=layout.width+4;mathText(value,x+(w-width)/2,y,width,h,color,false,false,font);
+    }else{
+        string fitted=value;
+        if(canvas.textWidth(fitted.c_str(),1)>w-4){
+            while(!fitted.empty()&&canvas.textWidth((fitted+"..").c_str(),1)>w-4)fitted.pop_back();
+            fitted+="..";
+        }
+        canvas.setTextColor(color);canvas.drawCentreString(fitted.c_str(),x+w/2,y+(h-8)/2,1);
+    }
+}
+void matrixGrid(int rows,int cols,int selected,bool augmented,
+                const std::function<string(int,int)>& value,
+                const std::function<void(int,int)>& select){
+    constexpr int left=29,width=264;
+    int cw=width/cols,ch=std::min(48,114/rows),top=72+(114-ch*rows)/2;
+    for(int c=0;c<cols;++c){
+        string label=augmented?(c==cols-1?"RHS":"x"+std::to_string(c+1)):std::to_string(c+1);
+        canvas.setTextColor(Muted);canvas.drawCentreString(label.c_str(),left+c*cw+cw/2,62,1);
+    }
+    for(int r=0;r<rows;++r){
+        text(std::to_string(r+1),6,top+r*ch+(ch-8)/2,Muted,1);
+        for(int c=0;c<cols;++c){
+            int x=left+c*cw,y=top+r*ch;bool active=r*cols+c==selected;
+            canvas.fillRect(x+1,y+1,cw-2,ch-2,active?0xD71E:White);
+            if(active)canvas.drawRect(x+1,y+1,cw-2,ch-2,Teal);
+            matrixValue(value(r,c),x+3,y+2,cw-6,ch-4,Ink);
+            buttons.push_back({x,y,cw,ch,"cell",[select,r,c]{select(r,c);}});
+        }
+    }
+    int right=left+cols*cw+7,bottom=top+rows*ch;
+    for(int x:{left-8,right}){
+        canvas.drawFastVLine(x,top,bottom-top,Ink);
+        canvas.drawFastHLine(x==right?x-6:x,top,7,Ink);
+        canvas.drawFastHLine(x==right?x-6:x,bottom-1,7,Ink);
+    }
+    if(augmented)canvas.drawFastVLine(left+(cols-1)*cw,top,rows*ch,Muted);
+}
+void drawMatrixForm(){
+    header(title);auto& m=matrixInputs[matrixOperand];
+    button(3,28,48,24,activeTool==Tool::Linear?"SYS":"A",[]{matrixOperand=0;selectMatrixCell(0,0);},matrixOperand==0?Teal:White,matrixOperand==0?White:Ink);
+    if(twoMatrices())button(55,28,48,24,"B",[]{matrixOperand=1;selectMatrixCell(0,0);},matrixOperand==1?Teal:White,matrixOperand==1?White:Ink);
+    button(107,28,48,24,activeTool==Tool::Linear?"N-":"R-",[]{resizeMatrix(-1,0);});
+    button(159,28,48,24,activeTool==Tool::Linear?"N+":"R+",[]{resizeMatrix(1,0);});
+    if(activeTool!=Tool::Linear){
+        button(211,28,48,24,"C-",[]{resizeMatrix(0,-1);});
+        button(263,28,54,24,"C+",[]{resizeMatrix(0,1);});
+    }
+    text(std::to_string(m.rows)+"x"+std::to_string(m.cols),5,54,Muted,1);
+    matrixGrid(m.rows,m.cols,matrixRow*m.cols+matrixCol,activeTool==Tool::Linear,
+        [](int r,int c){return matrixCell(matrixOperand,r,c);},
+        [](int r,int c){selectMatrixCell(r,c);showEditor(matrixCell(matrixOperand,r,c),Screen::Form);});
+    string label=string(matrixOperand?"B":"A")+"["+std::to_string(matrixRow+1)+","+std::to_string(matrixCol+1)+"]";
+    button(3,189,314,21,"",[]{showEditor(matrixCell(matrixOperand,matrixRow,matrixCol),Screen::Form);});
+    text(label,8,196,Teal,1);matrixValue(matrixCell(matrixOperand,matrixRow,matrixCol),65,191,246,17,Ink);
+    bar({"PREV","NEXT","EDIT","CLR","BACK","EXE"});
+}
+void drawUnitCategories(){
+    header("UNIT CONVERTER / CATEGORY");const auto& categories=unitCategories();
+    constexpr int perPage=12;int first=unitCategoryPage*perPage;
+    for(int j=first;j<std::min(first+perPage,int(categories.size()));++j){
+        int local=j-first,x=5+(local%2)*157,y=30+(local/2)*28;
+        button(x,y,150,25,categories[j].name,[j]{unitCategory=j;unitFrom=0;unitTo=1;open(Screen::UnitConvert);});
+    }
+    text("Choose a quantity to convert.",8,202,Muted,1);
+    bar({"PREV","NEXT","","","","BACK"});
+}
+void drawUnitConvert(){
+    header("UNIT CONVERTER");const auto& category=currentUnitCategory();
+    button(4,28,312,25,category.name+"  /  CHANGE",[]{unitCategoryPage=unitCategory/12;open(Screen::UnitCategories);},0xD71E,Ink);
+    text("Value",8,57,Muted,1);
+    button(4,69,312,39,"",[]{showEditor(unitValue,Screen::UnitConvert);});
+    if(unitValue.empty())text("Tap VALUE to enter a number",9,83,Muted,1);
+    else mathText(unitValue,8,71,304,35,Ink);
+    text("From",8,112,Muted,1);
+    button(4,123,312,31,category.units[unitFrom].name+"  ("+category.units[unitFrom].symbol+")",[]{openUnitPicker(true);});
+    text("To",8,158,Muted,1);
+    button(4,169,312,31,category.units[unitTo].name+"  ("+category.units[unitTo].symbol+")",[]{openUnitPicker(false);});
+    text("Expressions allowed, e.g. pi/2",8,199,Muted,1);
+    bar({"VALUE","FROM","TO","SWAP","BACK","EXE"});
+}
+void drawUnitSelect(){
+    const auto& category=currentUnitCategory();header(string(selectingSource?"FROM / ":"TO / ")+category.name);
+    const auto& units=category.units;constexpr int perPage=12;int first=unitListPage*perPage;
+    text("Choose a unit",7,28,Muted,1);
+    for(int j=first;j<std::min(first+perPage,int(units.size()));++j){
+        int local=j-first,x=5+(local%2)*157,y=42+(local/2)*27;
+        button(x,y,150,24,units[j].name+" ("+units[j].symbol+")",[j]{if(selectingSource)unitFrom=j;else unitTo=j;open(Screen::UnitConvert);});
+    }
+    bar({"PREV","NEXT","","","","BACK"});
+}
 void drawForm(){
+    if(matrixTool()){drawMatrixForm();return;}
     header(clipped(title,24));int page=fieldIndex/4,first=page*4;
     if(activeTool==Tool::ShiftSolve||activeTool==Tool::Substitute){
         text(fields[0].label,8,29,Muted,1);
@@ -415,6 +668,18 @@ void drawForm(){
 }
 void drawResults(){
     header(clipped(resultTitle,24));int y=32;
+    if(!resultMatrix.empty()){
+        int rows=int(resultMatrix.size()),cols=int(resultMatrix[0].size());
+        text("Result: "+std::to_string(rows)+" x "+std::to_string(cols),8,31,Blue);
+        text("Select a cell to read its full value.",8,51,Muted,1);
+        matrixGrid(rows,cols,resultMatrixCell,false,
+            [](int r,int c){return calc::format(resultMatrix[r][c],digits);},
+            [cols](int r,int c){resultMatrixCell=r*cols+c;dirty=true;});
+        int r=resultMatrixCell/cols,c=resultMatrixCell%cols;
+        text("["+std::to_string(r+1)+","+std::to_string(c+1)+"] =",8,196,Teal,1);
+        matrixValue(calc::format(resultMatrix[r][c],digits),65,189,249,21,Ink);
+        bar({"PREV","NEXT","","","BACK","MENU"});return;
+    }
     if(!resultEquation.empty()){
         mathText(resultEquation,6,28,308,60);
         canvas.drawFastHLine(6,92,308,Line);y=101;
@@ -423,7 +688,7 @@ void drawResults(){
             else text(resultLines[j],7,y+5,Muted,1);
             y+=21;
         }
-        bar({"UP","DOWN","","","BACK","MENU"});return;
+        bar({"UP","DOWN","","QR","BACK","MENU"});return;
     }
     for(int j=resultOffset;j<std::min(resultOffset+9,int(resultLines.size()));++j){text(clipped(resultLines[j],50),7,y,Ink,1);y+=19;}
     bar({"UP","DOWN","","","BACK","MENU"});
@@ -434,9 +699,51 @@ void drawSettings(){
     button(8,68,304,30,"Significant digits: "+std::to_string(digits),[]{digits=digits==12?4:digits+1;markSave();dirty=true;});
     button(8,104,304,30,"Brightness: "+std::to_string(light)+" / 16",[]{light=light==16?1:light+1;hardware::brightness(light);markSave();dirty=true;});
     button(8,140,304,30,"Graph type: "+string(graphType==0?"Cartesian":graphType==1?"Polar":"Parametric"),[]{graphType=(graphType+1)%3;trace=false;markSave();dirty=true;});
-    text(string("GT911 touch: ")+(hardware::touchFound?"OK":"not detected"),8,180,hardware::touchFound?Teal:Red,1);
-    text(string("Keyboard: ")+(hardware::keyboardFound?"OK":"not detected"),8,196,hardware::keyboardFound?Teal:Red,1);
+    auto battery=hardware::batteryInfo();int charge=estimatedBatteryPercent(battery);
+    string batteryLine=battery.valid?"BAT "+calc::format(battery.millivolts/1000.0,4)+"V  ~"+std::to_string(charge)+"%":"BATTERY ADC UNAVAILABLE";
+    text(batteryLine,8,179,charge>=0&&charge<=15?Red:Ink,1);
+    text("Voltage based estimate; no fuel gauge",8,195,Muted,1);
+    button(226,177,86,29,"SYSTEM",[]{open(Screen::SystemInfo);});
     bar({"","","","","SAVE","MENU"});
+}
+void drawSystemInfo(){
+    header("SYSTEM INFO");auto battery=hardware::batteryInfo();int charge=estimatedBatteryPercent(battery);
+    text("BATTERY",7,28,Teal,1);
+    text(battery.valid?"Voltage: "+calc::format(battery.millivolts/1000.0,4)+" V   estimate "+std::to_string(charge)+"%":"Voltage: unavailable (GPIO 4 ADC)",7,40,Ink,1);
+    text("ADC pin: "+std::to_string(battery.adcMillivolts)+" mV; raw "+std::to_string(battery.raw),7,53,Muted,1);
+    text("No fuel gauge; charge state not MCU-readable.",7,66,Muted,1);
+    text("ESP32",7,82,Teal,1);
+    text(string("Chip: ")+(ESP.getChipModel()?ESP.getChipModel():"unknown")+" rev "+std::to_string(ESP.getChipRevision()),7,94,Ink,1);
+    text("CPU: "+std::to_string(ESP.getCpuFreqMHz())+" MHz; "+std::to_string(ESP.getChipCores())+" cores",7,107,Ink,1);
+    text("Flash: "+std::to_string(ESP.getFlashChipSize()/1048576)+" MB",7,120,Ink,1);
+    text("PSRAM: "+std::to_string(ESP.getPsramSize()/1024)+" KB total, "+std::to_string(ESP.getFreePsram()/1024)+" KB free",7,133,Ink,1);
+    text("Heap: "+std::to_string(ESP.getHeapSize()/1024)+" KB total, "+std::to_string(ESP.getFreeHeap()/1024)+" KB free",7,146,Ink,1);
+    text(string("SDK: ")+(ESP.getSdkVersion()?ESP.getSdkVersion():"unknown"),7,159,Ink,1);
+    text("Uptime: "+std::to_string(millis()/1000)+" seconds",7,172,Ink,1);
+    text(string("Touch: ")+(hardware::touchFound?"GT911 detected":"not detected")+"  Keyboard: "+(hardware::keyboardFound?"OK":"missing"),7,188,Muted,1);
+    bar({"","","","","BACK","MENU"});
+}
+void drawQrCode(){
+    header("QR / LATEX");
+    if(!qrReady||hardware::qrSize()<=0){
+        text("QR code too large or unavailable.",12,83,Red,2);
+        text("Try a shorter expression.",12,108,Muted,1);
+        mathText(qrEquation,8,132,304,54,Ink);
+    }else{
+        int n=hardware::qrSize(),total=n+8;
+        int scale=std::min(6,std::min((320-16)/total,(240-24-26)/total));
+        int side=total*scale,x0=(320-side)/2,y0=24+(189-side)/2;
+        canvas.fillRect(x0,y0,side,side,White);
+        for(int y=0;y<n;++y){
+            int run=-1;
+            for(int x=0;x<=n;++x){
+                bool black=x<n&&hardware::qrModule(x,y);
+                if(black&&run<0)run=x;
+                else if(!black&&run>=0){canvas.fillRect(x0+(run+4)*scale,y0+(y+4)*scale,(x-run)*scale,scale,Ink);run=-1;}
+            }
+        }
+    }
+    bar({"","","","","BACK","MENU"});
 }
 const vector<string>& helpLines(){static const vector<string> lines={
     "NEW: SHIFT CALC / SOLVE",
@@ -455,7 +762,7 @@ const vector<string>& helpLines(){static const vector<string> lines={
     "S<>D displays a stacked fraction.",
     "Formatting does not add exact surds.",
     "",
-    "DECK CALC - CG50-inspired workflows", "Touch tiles, fields and the six soft keys.","Trackball moves cursor; click selects.","Hold trackball (0.7s) or $ opens MENU.","Keyboard Enter = EXE. Backspace = DEL.","Esc = BACK. Tab cycles soft keys.","On MENU, keys 1..9 open an app.","Tap input to open the virtual keypad.","Editor: < > move cursor; AC clears.","OPTN inserts scientific functions.","Numbers: use keyboard Alt or keypad.","", "Syntax: 2x, 2(x+1), x^2, 5!, 25%", "Power before unary minus: -2^2 = -4", "pi, e, i, ans; a=5 stores a variable.","Letters e,i,x,t are reserved.","x / t are the graph parameter.","Complex: sqrt(-1), (2+3i)/(1-i)","Functions: sin, asin, sinh, ln, log", "re, im, conj, abs, arg, ncr, npr", "diff(x^3,2) = derivative at x=2", "integral(sin(x),0,pi) = integral", "solve(x^2-2,0,2) = bracketed root", "Normal: normalpdf(z), normalcdf(z)","Binomial: binompdf(n,p,k), binomcdf", "Poisson: poissonpdf(lambda,k), CDF", "", "GRAPH: tap colored Y label to toggle.","Tap formula to edit, DRAW to plot.","TRACE: roll X; roll Y changes curve.","Click in TRACE returns to cursor mode.","Tap plot selects trace parameter.","V-WIN edits axes and T/theta bounds.","Polar uses current angle unit.","Parametric pairs: X1,Y1; X2,Y2; X3,Y3.","G-SLV tools use real Cartesian f(x).", "Root bounds must bracket a sign change.","Min/max require a unimodal interval.","Integrals need a continuous interval.","Graphs approximate; poles can be missed.","", "TABLE: FUNC cycles function columns.","STAT: commas separate data values.","Quartiles exclude the median (odd n).", "MATRIX: 1,2;3,4 is a 2 x 2 matrix.","SIMULT: 2,1,5;1,-1,1 means", "2x+y=5 and x-y=1. Max 6 unknowns.","BASE uses signed 64-bit integers.","Finance uses ordinary compounding.","Settings, graph entries, variables and", "Ans save after 1.5 seconds idle.","Calculation history is session-only.","", "Limits: numerical double precision.","No CAS, exact surds, 3D, spreadsheet,", "Python or Casio program compatibility.","Independent firmware; no Casio ROM."};return lines;}
+    "DECK CALC - CG50-inspired workflows", "Touch tiles, fields and the six soft keys.","Trackball moves cursor; click selects.","Hold trackball (0.7s) or $ opens MENU.","Keyboard Enter = EXE. Backspace = DEL.","Esc = BACK. Tab cycles soft keys.","On MENU, keys 1..9 open apps; 0 opens CONVERT.","Tap input to open the virtual keypad.","Editor: < > move cursor; AC clears.","OPTN inserts scientific functions.","Numbers: use keyboard Alt or keypad.","", "Syntax: 2x, 2(x+1), x^2, 5!, 25%", "Power before unary minus: -2^2 = -4", "pi, e, i, ans; a=5 stores a variable.","Letters e,i,x,t are reserved.","x / t are the graph parameter.","Complex: sqrt(-1), (2+3i)/(1-i)","Functions: sin, asin, sinh, ln, log", "re, im, conj, abs, arg, ncr, npr", "diff(x^3,2) = derivative at x=2", "integral(sin(x),0,pi) = integral", "solve(x^2-2,0,2) = bracketed root", "Normal: normalpdf(z), normalcdf(z)","Binomial: binompdf(n,p,k), binomcdf", "Poisson: poissonpdf(lambda,k), CDF", "", "GRAPH: tap colored Y label to toggle.","Tap formula to edit, DRAW to plot.","TRACE: roll X; roll Y changes curve.","Click in TRACE returns to cursor mode.","Tap plot selects trace parameter.","V-WIN edits axes and T/theta bounds.","Polar uses current angle unit.","Parametric pairs: X1,Y1; X2,Y2; X3,Y3.","G-SLV tools use real Cartesian f(x).", "Root bounds must bracket a sign change.","Min/max require a unimodal interval.","Integrals need a continuous interval.","Graphs approximate; poles can be missed.","", "TABLE: FUNC cycles function columns.","STAT: commas separate data values.","Quartiles exclude the median (odd n).", "MATRIX: tap a grid cell to edit.", "A/B tabs choose the operand.", "R-/R+ rows; C-/C+ columns. Max 6x6.", "PREV/NEXT select; typing replaces cell.", "EDIT preserves it; CLR clears one cell.", "EXE calculates. BACK keeps your input.", "Results: select a cell for full value.", "SIMULT: coefficient grid | RHS.", "N-/N+ set the number of unknowns (1-6).","CONVERT: choose category, value, FROM, TO.", "SWAP reverses the units; EXE converts.", "Includes metric, US/Imperial and SI units.", "Temperature and fuel-economy scales included.","RUN QR encodes a LaTeX-rendered equation link.","Scanning needs Internet; the equation is shared.", "SETUP shows battery and SYSTEM INFO.","Battery percent is a voltage estimate only.", "BASE uses signed 64-bit integers.","Finance uses ordinary compounding.","Settings, graph entries, variables and", "Ans save after 1.5 seconds idle.","Calculation history is session-only.","", "Limits: numerical double precision.","No CAS, exact surds, 3D, spreadsheet,", "Python or Casio program compatibility.","Independent firmware; no Casio ROM."};return lines;}
 void drawHelp(){header("HELP");auto& lines=helpLines();for(int j=0;j<10&&resultOffset+j<int(lines.size());++j)text(lines[resultOffset+j],5,31+j*17,Ink,1);bar({"UP","DOWN","","","","MENU"});}
 void drawEditor(){
     header("MATH EDIT");if(editorReturn==Screen::Run)calcKeys();
@@ -487,8 +794,38 @@ void soft(int n){
         case Screen::Graph:if(n==0){trace=!trace;if(!activeGraph(selectedFn))selectGraph(1);traceX=graphType==0?(xmin+xmax)/2:(parameterMin+parameterMax)/2;dirty=true;}if(n==1)zoom(0.5);if(n==2)zoom(2);if(n==3)showForm(Tool::Window);if(n==4){if(graphType!=0)message("G-SLV uses Cartesian f(x)");else showTools(4);}if(n==5)open(Screen::Functions);break;
         case Screen::Table:if(n==0)tableRow-=8;if(n==1)tableRow+=8;if(n==2)selectedFn=(selectedFn+1)%6;if(n==3)showForm(Tool::TableSetup);if(n==4)open(Screen::Graph);if(n==5)open(Screen::Menu);dirty=true;break;
         case Screen::Tools:if(n==5)open(toolGroup==4?Screen::Graph:Screen::Menu);break;
-        case Screen::Form:if(n==0||n==1){fieldIndex=(fieldIndex+(n==0?-1:1)+fields.size())%fields.size();cursor=fields[fieldIndex].value.size();dirty=true;}if(n==2)showEditor(fields[fieldIndex].value,Screen::Form);if(n==3)catalog();if(n==4)open(formReturn);if(n==5)execute();break;
-        case Screen::Results:if(n==0)resultOffset=std::max(0,resultOffset-4);if(n==1)resultOffset=std::min(std::max(0,int(resultLines.size())-(resultEquation.empty()?9:5)),resultOffset+4);if(n==4)open(resultReturn);if(n==5)open(Screen::Menu);dirty=true;break;
+        case Screen::UnitCategories:{int pages=(int(unitCategories().size())+11)/12;if(n==0)unitCategoryPage=std::max(0,unitCategoryPage-1);if(n==1)unitCategoryPage=std::min(pages-1,unitCategoryPage+1);if(n==5)open(Screen::Menu);dirty=true;break;}
+        case Screen::UnitConvert:
+            if(n==0)showEditor(unitValue,Screen::UnitConvert);
+            if(n==1)openUnitPicker(true);
+            if(n==2)openUnitPicker(false);
+            if(n==3)std::swap(unitFrom,unitTo);
+            if(n==4)open(Screen::Menu);
+            if(n==5)convertUnits();dirty=true;break;
+        case Screen::UnitSelect:{int pages=(int(currentUnitCategory().units.size())+11)/12;if(n==0)unitListPage=std::max(0,unitListPage-1);if(n==1)unitListPage=std::min(pages-1,unitListPage+1);if(n==5)open(Screen::UnitConvert);dirty=true;break;}
+        case Screen::SystemInfo:if(n==4)open(Screen::Settings);if(n==5)open(Screen::Menu);break;
+        case Screen::QRCode:if(n==4)open(qrReturn);if(n==5)open(Screen::Menu);break;
+        case Screen::Form:
+            if(matrixTool()){
+                if(n==0||n==1)stepMatrixCell(n==0?-1:1);
+                if(n==2)showEditor(matrixCell(matrixOperand,matrixRow,matrixCol),Screen::Form);
+                if(n==3){clearInput();matrixReplace=false;}
+            }else{
+                if(n==0||n==1){fieldIndex=(fieldIndex+(n==0?-1:1)+fields.size())%fields.size();cursor=fields[fieldIndex].value.size();dirty=true;}
+                if(n==2)showEditor(fields[fieldIndex].value,Screen::Form);
+                if(n==3)catalog();
+            }
+            if(n==4)open(formReturn);if(n==5)execute();break;
+        case Screen::Results:
+            if(!resultMatrix.empty()){
+                int count=int(resultMatrix.size()*resultMatrix[0].size());
+                if(n==0||n==1)resultMatrixCell=(resultMatrixCell+(n==0?-1:1)+count)%count;
+            }else{
+                if(n==0)resultOffset=std::max(0,resultOffset-4);
+                if(n==1)resultOffset=std::min(std::max(0,int(resultLines.size())-(resultEquation.empty()?9:5)),resultOffset+4);
+            }
+            if(n==3&&!resultEquation.empty())showQr(resultEquation);
+            if(n==4)open(resultReturn);if(n==5)open(Screen::Menu);dirty=true;break;
         case Screen::Settings:if(n==4){save();message("Saved");}if(n==5)open(Screen::Menu);break;
         case Screen::Help:if(n==0)resultOffset=std::max(0,resultOffset-9);if(n==1)resultOffset=std::min(std::max(0,int(helpLines().size())-10),resultOffset+9);if(n==5)open(Screen::Menu);dirty=true;break;
         case Screen::Editor:if(n==0)catalog();if(n==1&&cursor)--cursor;if(n==2&&editTarget&&cursor<editTarget->size())++cursor;if(n==3)erase();if(n==4)clearInput();if(n==5)closeEditor();dirty=true;break;
@@ -503,7 +840,7 @@ void click(int x,int y){
     if(screen==Screen::Editor&&x>=5&&x<315&&y>=27&&y<81){cursor=editorLayout.hitTest(x-editorMathX,y-editorMathY);dirty=true;return;}
     if(screen==Screen::Graph&&x>=GX&&x<GX+GW&&y>=GY&&y<GY+GH){trace=true;if(!activeGraph(selectedFn))selectGraph(1);double lo=graphType==0?xmin:parameterMin,hi=graphType==0?xmax:parameterMax;traceX=lo+(hi-lo)*(x-GX)/(GW-1);dirty=true;}
 }
-void back(){switch(screen){case Screen::Editor:closeEditor();break;case Screen::Catalog:open(catalogReturn);break;case Screen::Results:open(resultReturn);break;case Screen::Graph:open(Screen::Functions);break;case Screen::Form:soft(4);break;default:open(Screen::Menu);break;}}
+void back(){switch(screen){case Screen::Editor:closeEditor();break;case Screen::Catalog:open(catalogReturn);break;case Screen::Results:open(resultReturn);break;case Screen::Graph:open(Screen::Functions);break;case Screen::Form:soft(4);break;case Screen::UnitSelect:open(Screen::UnitConvert);break;case Screen::SystemInfo:open(Screen::Settings);break;case Screen::QRCode:open(qrReturn);break;case Screen::UnitConvert:case Screen::UnitCategories:open(Screen::Menu);break;default:open(Screen::Menu);break;}}
 void keyboard(char key){
     if(key=='$'){open(Screen::Menu);return;}if(key==27){back();return;}
     bool calcScreen=screen==Screen::Run||(screen==Screen::Editor&&editorReturn==Screen::Run);
@@ -512,15 +849,21 @@ void keyboard(char key){
     if(key=='\t'){static int tab=0;pointerX=(tab++%6)*53+25;pointerY=226;pointerVisible=true;dirty=true;return;}
     if(key=='\r'||key=='\n'){
         if(pointerVisible){click(pointerX,pointerY);pointerVisible=false;}
-        else if(screen==Screen::Run)run();else if(screen==Screen::Form)execute();else if(screen==Screen::Editor)closeEditor();else if(screen==Screen::Functions)soft(0);return;
+        else if(screen==Screen::Run)run();else if(screen==Screen::Form)execute();else if(screen==Screen::Editor)closeEditor();else if(screen==Screen::Functions)soft(0);else if(screen==Screen::UnitConvert)convertUnits();return;
     }
-    if(screen==Screen::Menu&&key>='1'&&key<='9'){int j=key-'1';click(55+(j%3)*105,55+(j/3)*57);return;}
+    if(screen==Screen::Menu&&key>='1'&&key<='9'){int j=key-'1';click(55+(j%3)*105,45+(j/3)*42);return;}
+    if(screen==Screen::Menu&&key=='0'){click(55,45+3*42);return;}
+    // Typing in the grid replaces the selected entry; EDIT preserves the old
+    // expression for cursor-based changes in the full math editor.
+    if(screen==Screen::Form&&matrixTool()&&matrixReplace&&((key>=32&&key<127)||key==8||key==127)){
+        clearInput();matrixReplace=false;
+    }
     if(key==8||key==127){erase();return;}
     if(currentInput()&&key>=32&&key<127){pointerVisible=false;insert(string(1,key));}
 }
 void render(){
     buttons.clear();canvas.fillSprite(Bg);
-    switch(screen){case Screen::Menu:drawMenu();break;case Screen::Run:drawRun();break;case Screen::Functions:drawFunctions();break;case Screen::Graph:drawGraph();break;case Screen::Table:drawTable();break;case Screen::Tools:drawTools();break;case Screen::Form:drawForm();break;case Screen::Results:drawResults();break;case Screen::Settings:drawSettings();break;case Screen::Help:drawHelp();break;case Screen::Editor:drawEditor();break;case Screen::Catalog:drawCatalog();break;}
+    switch(screen){case Screen::Menu:drawMenu();break;case Screen::Run:drawRun();break;case Screen::Functions:drawFunctions();break;case Screen::Graph:drawGraph();break;case Screen::Table:drawTable();break;case Screen::Tools:drawTools();break;case Screen::Form:drawForm();break;case Screen::Results:drawResults();break;case Screen::Settings:drawSettings();break;case Screen::Help:drawHelp();break;case Screen::Editor:drawEditor();break;case Screen::Catalog:drawCatalog();break;case Screen::UnitCategories:drawUnitCategories();break;case Screen::UnitConvert:drawUnitConvert();break;case Screen::UnitSelect:drawUnitSelect();break;case Screen::SystemInfo:drawSystemInfo();break;case Screen::QRCode:drawQrCode();break;}
     if(!notice.empty()){canvas.fillRoundRect(4,183,312,26,4,Ink);text(clipped(notice,48),8,192,White,1);}
     if(pointerVisible){canvas.fillTriangle(pointerX,pointerY,pointerX+3,pointerY+12,pointerX+10,pointerY+8,Ink);canvas.drawTriangle(pointerX,pointerY,pointerX+3,pointerY+12,pointerX+10,pointerY+8,White);}
     canvas.pushSprite(0,0);dirty=false;
@@ -533,6 +876,8 @@ void setup(){
 }
 void loop(){
     static uint32_t polled=0,drawn=0,touchSeen=0;static bool wasTouch=false;uint32_t now=millis();
+    static uint32_t batteryPolled=0;
+    if(now-batteryPolled>=5000){batteryPolled=now;hardware::sampleBattery();dirty=true;}
     if(now-polled>=12){polled=now;char ch=hardware::key();if(ch)keyboard(ch);while(Serial.available())keyboard(char(Serial.read()));
         int x=0,y=0;bool pressed=false;if(hardware::touch(x,y,pressed)){touchSeen=now;if(pressed){pointerVisible=false;if(!wasTouch)click(x,y);else if(screen==Screen::Graph&&trace&&y>=GY&&y<GY+GH)click(x,y);}wasTouch=pressed;}
         // Recover from a lost I2C release without generating repeated held taps.

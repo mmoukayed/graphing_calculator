@@ -3,14 +3,18 @@
 #include <cassert>
 namespace hardware {
 TFT_eSPI display;bool touchFound=true,keyboardFound=true;
+int ballX=0,ballY=0;bool ballClick=false;
 void begin(){}void brightness(uint8_t){}char key(){return 0;}
-bool touch(int&,int&,bool&){return false;}void ball(int& x,int& y,bool& click,bool& held){x=y=0;click=held=false;}
+void sampleBattery(){}BatteryInfo batteryInfo(){return {3900,1950,2400,true};}
+bool generateQr(const char*){return true;}int qrSize(){return 21;}bool qrModule(int x,int y){return x==0||y==0||x==20||y==20;}
+bool touch(int&,int&,bool&){return false;}void ball(int& x,int& y,bool& click,bool& held){x=ballX;y=ballY;click=ballClick;held=false;ballX=ballY=0;ballClick=false;}
 }
 int checks=0;
 void check(bool ok,const char* label){++checks;if(!ok){std::cerr<<"FAIL: "<<label<<"\n";std::exit(1);}}
 void type(const string& s){for(char ch:s)keyboard(ch);}
 string previewDirectory="/tmp";
 void screenshot(const char* path){render();string name=path;name=name.substr(name.find_last_of('/')+1);check(canvas.writePPM((previewDirectory+"/"+name).c_str()),"write preview");}
+Button matrixButton(int index){render();for(const auto& b:buttons)if(b.label=="cell"&&index--==0)return b;check(false,"matrix cell hit box exists");return {};}
 int main(int argc,char** argv){
     if(argc>1)previewDirectory=argv[1];
     setup();check(screen==Screen::Menu,"boot menu");screenshot("/private/tmp/deck-menu.ppm");
@@ -69,6 +73,63 @@ int main(int argc,char** argv){
         auto l=mathlayout::typeset(s,measure);check(l.formatted&&l.carets.size()==s.size()+1,"layout source mapping");
         for(auto& c:l.carets)check(c.x>=0&&c.x<=l.width&&c.y>=0&&c.y+c.height<=l.height+1,"caret within layout");
     }
+    // Actual matrix grid: no serialized row delimiters in the form or result.
+    showForm(Tool::Inverse);check(fields.empty()&&matrixInputs[0].rows==2&&matrixInputs[0].cols==2,"matrix form is a cell model");
+    screenshot("deck-matrix.ppm");
+    auto cell=matrixButton(1);click(cell.x+cell.w/2,cell.y+cell.h/2);
+    check(screen==Screen::Editor&&editTarget==&matrixCell(0,0,1),"touch edits the addressed matrix cell");
+    soft(4);type("sqrt(9)");soft(5);check(screen==Screen::Form&&matrixCell(0,0,1)=="sqrt(9)","math editor returns to grid");
+    soft(1);check(matrixRow==1&&matrixCol==0,"NEXT traverses row-major cells");
+    type("12");check(matrixCell(0,1,0)=="12","first keyboard digit replaces selected cell, later digits append");
+    keyboard(8);check(matrixCell(0,1,0)=="1","cell backspace");
+    soft(0);check(matrixRow==0&&matrixCol==1,"PREV cell");
+    soft(3);check(matrixCell(0,0,1).empty(),"CLR only clears selected cell");type("2");
+    selectMatrixCell(0,0);soft(0);check(matrixRow==1&&matrixCol==1,"PREV wraps to final cell");soft(1);check(matrixRow==0&&matrixCol==0,"NEXT wraps to first cell");
+    // Drive the real loop with a trackball movement and click.
+    cell=matrixButton(2);pointerX=cell.x+cell.w/2-board::PointerStep;pointerY=cell.y+cell.h/2;
+    hardware::ballX=1;hardware::ballClick=true;mockMillis+=20;loop();
+    check(screen==Screen::Editor&&editTarget==&matrixCell(0,1,0),"trackball selects and edits a grid cell");soft(5);
+    // Resize controls, independent operands, and retained hidden entries.
+    showForm(Tool::Multiply);click(290,40);check(matrixInputs[0].cols==3,"C+ resizes A");
+    matrixCell(0,0,2)="7";click(235,40);click(290,40);check(matrixCell(0,0,2)=="7","shrink and expand preserves cells");
+    click(77,40);check(matrixOperand==1&&matrixInputs[1].cols==2,"B has independent dimensions");
+    click(181,40);check(matrixInputs[1].rows==3,"R+ resizes B");
+    matrixCell(1,2,0)="2";matrixCell(1,2,1)="3";
+    execute();check(resultTitle!="Calculation error"&&resultMatrix==calc::Matrix({{15,23},{3,4}}),"rectangular multiplication uses grid operands");
+    screenshot("deck-matrix-result.ppm");
+    check(resultLines.empty(),"matrix result is not row-separated text");
+    cell=matrixButton(3);click(cell.x+2,cell.y+2);check(resultMatrixCell==3,"result cells can be inspected");soft(1);check(resultMatrixCell==0,"result NEXT wraps");soft(0);check(resultMatrixCell==3,"result PREV wraps");
+    soft(4);check(screen==Screen::Form&&matrixInputs[0].cols==3&&matrixCell(0,0,2)=="7","BACK preserves matrix operands");
+    showForm(Tool::Transpose);resizeMatrix(0,1);matrixCell(0,0,2)="5";matrixCell(0,1,2)="6";
+    execute();check(resultMatrix==calc::Matrix({{1,3},{2,4},{5,6}}),"rectangular transpose");
+    showForm(Tool::Add);execute();check(resultMatrix==calc::Matrix({{2,2},{3,5}}),"grid matrix addition");
+    showForm(Tool::Inverse);execute();check(resultMatrix.size()==2&&std::abs(resultMatrix[0][0]+2)<1e-12,"grid inverse");
+    showForm(Tool::Det);execute();check(resultMatrix.empty()&&resultLines[0]=="det(A) = -2","determinant remains scalar, clears old grid result");
+    showForm(Tool::Det);resizeMatrix(0,1);execute();check(resultTitle=="Calculation error","non-square determinant rejected");
+    showForm(Tool::Inverse);matrixCell(0,1,0)="2";execute();check(resultTitle=="Calculation error","singular matrix rejected");
+    showForm(Tool::Add);matrixOperand=1;resizeMatrix(1,0);execute();check(resultTitle=="Calculation error","addition dimension mismatch");
+    showForm(Tool::Multiply);resizeMatrix(0,1);execute();check(resultTitle=="Calculation error","multiplication dimension mismatch");
+    for(const string& invalid:{"", "1/0", "sqrt(-1)", "1,2", "1;2"}){
+        showForm(Tool::Add);matrixCell(1,1,0)=invalid;execute();
+        check(resultTitle=="Calculation error"&&resultLines[0].find("B[2,1]")!=string::npos,"invalid cell identifies operand and coordinates");
+        soft(4);check(matrixOperand==1&&matrixRow==1&&matrixCol==0,"error BACK focuses failing cell");
+    }
+    showForm(Tool::Transpose);matrixCell(0,0,0)="max(1,3)";execute();check(resultMatrix[0][0]==3,"function commas stay inside one cell");
+    showForm(Tool::Add);matrixCell(0,0,0)="1e308";matrixCell(1,0,0)="1e308";execute();check(resultTitle=="Calculation error","matrix arithmetic overflow rejected");
+    showForm(Tool::Transpose);for(int j=0;j<10;++j)resizeMatrix(1,1);
+    check(matrixInputs[0].rows==6&&matrixInputs[0].cols==6,"matrix size bounded at 6x6");
+    matrixCell(0,5,5)="123456789012";screenshot("deck-matrix-6x6.ppm");
+    render();int cellCount=0;for(const auto& b:buttons)if(b.label=="cell"){++cellCount;check(b.x>=0&&b.y>=72&&b.x+b.w<320&&b.y+b.h<=186,"grid hit boxes fit display");}
+    check(cellCount==36,"all 36 cells available");execute();check(resultMatrix.size()==6&&resultMatrix[5][5]==123456789012.0,"6x6 evaluation and transpose");screenshot("deck-matrix-result-6x6.ppm");
+    soft(4);selectMatrixCell(5,5);for(int j=0;j<10;++j)resizeMatrix(-1,-1);
+    check(matrixInputs[0].rows==1&&matrixInputs[0].cols==1&&matrixRow==0&&matrixCol==0,"resize minimum and selection clamping");
+    execute();check(resultMatrix.size()==1&&resultMatrix[0].size()==1,"1x1 matrix");
+    showForm(Tool::Linear);resizeMatrix(1,0);check(matrixInputs[0].cols==4&&matrixCell(0,0,3)=="5"&&matrixCell(0,0,2)=="0","system resize keeps RHS in final column");
+    resizeMatrix(-1,0);execute();check(resultTitle!="Calculation error"&&resultLines[0]=="x1 = 2"&&resultLines[1]=="x2 = 1","augmented grid solves system");
+    soft(4);screenshot("deck-matrix-system.ppm");for(int j=0;j<10;++j)resizeMatrix(1,0);
+    check(matrixInputs[0].rows==6&&matrixInputs[0].cols==7,"six-variable augmented matrix fits");render();
+    for(int r=0;r<6;++r){for(int c=0;c<6;++c)matrixCell(0,r,c)=r==c?"1":"0";matrixCell(0,r,6)=std::to_string(r+1);}
+    execute();check(resultLines.size()==6&&resultLines[5]=="x6 = 6","six-variable grid solution");
     save();double savedX=context.x;context.x=0;load();check(context.x==savedX,"persist solved X");
     std::cout<<"PASS: "<<checks<<" UI checks; previews in "<<previewDirectory<<"\n";
 }
